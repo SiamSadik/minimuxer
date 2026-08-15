@@ -25,6 +25,7 @@ public enum MinimuxerError: Error, Equatable, CustomStringConvertible, Localized
     case notStarted(String)
     case pairingNotLoaded(String)
     case connectionModeNotConfigured(String)
+    case pairingFile(protocol: PairingProtocol, reason: String)
     case restartAlreadyInProgressError(String)
     case invalidVPN(String)
     case invalidPairing(protocol: PairingProtocol, reason: String)
@@ -77,6 +78,7 @@ public enum MinimuxerError: Error, Equatable, CustomStringConvertible, Localized
         case .noVPN(let r): return "NoVPN: \(r)"
         case .notStarted(let r): return "NotStarted: \(r)"
         case .pairingNotLoaded(let r): return "PairingNotLoaded: \(r)"
+        case .pairingFile(let proto, let reason): return "PairingFile(protocol: \(proto), reason: \(reason))"
         case .restartAlreadyInProgressError(let r): return "RestartAlreadyInProgressError: \(r)"
         case .invalidVPN(let r): return "InvalidVPN: \(r)"
         case .invalidPairing(let proto, let reason): return "InvalidPairing(protocol: \(proto), reason: \(reason))"

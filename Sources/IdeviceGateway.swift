@@ -8,6 +8,7 @@
 
 import Foundation
 import IDevice
+import MinimuxerDomain
 
 internal enum IdeviceGatewayError: LocalizedError {
     case invalidPairingFile(reason: String)
@@ -621,12 +622,10 @@ internal final class IdeviceGateway {
         return try action(client)
     }
 
-    private func performWithTcpService<T>(
+    private func connectWithTcpService(
         connect: @escaping (OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
-        cleanup: @escaping (OpaquePointer?) -> Void,
-        serviceName: String,
-        action: (OpaquePointer) throws -> T
-    ) throws -> T {
+        serviceName: String
+    ) throws -> OpaquePointer {
         verboseLog("[IdeviceGateway] performWithTcpService(\(serviceName)) started")
         
         guard let deviceEndpointIp = deviceEndpointIp else {
@@ -696,6 +695,19 @@ internal final class IdeviceGateway {
         guard let client = client else {
             throw IdeviceGatewayError.noConnection
         }
+        return client
+    }
+
+    private func performWithTcpService<T>(
+        connect: @escaping (OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
+        cleanup: @escaping (OpaquePointer?) -> Void,
+        serviceName: String,
+        action: (OpaquePointer) throws -> T
+    ) throws -> T {
+        let client = try connectWithTcpService(
+            connect: connect,
+            serviceName: serviceName
+        )
         defer { cleanup(client) }
 
         return try action(client)
@@ -1371,33 +1383,51 @@ internal final class IdeviceGateway {
         }
     }
 
-    private func syncPerformHeartbeat(interval: UInt64, newInterval: UnsafeMutablePointer<UInt64>) throws {
-       debugLog("[IdeviceGateway] performHeartbeat() called, interval: \(interval)")
-       try verifyInitialized()
-       try performWithEitherService(
-           connectRP: heartbeat_connect_rsd,
-           connectLockdown: heartbeat_connect,
-           cleanup: heartbeat_client_free,
-           serviceName: "heartbeat"
-       ) { client in
-           verboseLog("[IdeviceGateway] performHeartbeat() calling heartbeat_get_marco")
-           let getErr = heartbeat_get_marco(client, interval, newInterval)
-           if let getErr = getErr {
-               let msg = self.getErrorMessage(from: getErr)
-               debugLog("[IdeviceGateway] performHeartbeat() heartbeat_get_marco failed: \(msg)")
-               defer { idevice_error_free(getErr) }
-               throw IdeviceGatewayError.serviceError("Heartbeat receive failed, error: (\(msg))")
-           }
-           verboseLog("[IdeviceGateway] performHeartbeat() calling heartbeat_send_polo")
-           let sendErr = heartbeat_send_polo(client)
-           if let sendErr = sendErr {
-               let msg = self.getErrorMessage(from: sendErr)
-               debugLog("[IdeviceGateway] performHeartbeat() heartbeat_send_polo failed: \(msg)")
-               defer { idevice_error_free(sendErr) }
-               throw IdeviceGatewayError.serviceError("Heartbeat send failed, error: (\(msg))")
-           }
-           debugLog("[IdeviceGateway] performHeartbeat() succeeded, newInterval: \(newInterval.pointee)")
-       }
+    func connectLockdownHeartbeat() throws -> OpaquePointer {
+        try verifyInitialized()
+        guard !isRPPairing else {
+            throw IdeviceGatewayError.serviceError(
+                "Lockdown heartbeat is unavailable for Remote Pairing"
+            )
+        }
+        return try connectWithTcpService(
+            connect: heartbeat_connect,
+            serviceName: "heartbeat"
+        )
+    }
+
+    func exchangeHeartbeat(client: OpaquePointer, interval: UInt64) throws -> UInt64 {
+        var newInterval: UInt64 = 0
+        let getError = heartbeat_get_marco(client, interval, &newInterval)
+        if let getError {
+            let message = getErrorMessage(from: getError)
+            debugLog(
+                "[IdeviceGateway] exchangeHeartbeat() " +
+                "heartbeat_get_marco failed: \(message)"
+            )
+            safeFreeError(getError)
+            throw IdeviceGatewayError.serviceError(
+                "Heartbeat receive failed: \(message)"
+            )
+        }
+
+        let sendError = heartbeat_send_polo(client)
+        if let sendError {
+            let message = getErrorMessage(from: sendError)
+            debugLog(
+                "[IdeviceGateway] exchangeHeartbeat() " +
+                "heartbeat_send_polo failed: \(message)"
+            )
+            safeFreeError(sendError)
+            throw IdeviceGatewayError.serviceError(
+                "Heartbeat send failed: \(message)"
+            )
+        }
+        return newInterval
+    }
+
+    func disconnectHeartbeat(_ client: OpaquePointer) {
+        heartbeat_client_free(client)
     }
 
     private func syncMountPersonalizedDdi(image: Data, trustcache: Data, manifest: Data) throws {
@@ -1683,15 +1713,14 @@ internal final class IdeviceGateway {
                   let dict = try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil) as? [String: Any]
             else { continue }
             
-            let mountPath = dict["MountPath"] as? String
-            let imageType = dict["PersonalizedImageType"] as? String
-            let diskType = dict["DiskImageType"] as? String
-            
-            let mountPathMatches = mountPath == "/System/Developer"
-            let imageTypeMatches = imageType == "DeveloperDiskImage"
-            let diskTypeMatches = (diskType == nil || diskType == "Personalized")
-            
-            if mountPathMatches && imageTypeMatches && diskTypeMatches {
+            let descriptor = DeveloperDiskImageMountDescriptor(
+                mountPath: dict["MountPath"] as? String,
+                personalizedImageType: dict["PersonalizedImageType"] as? String,
+                diskImageType: dict["DiskImageType"] as? String,
+                isMounted: dict["IsMounted"] as? Bool
+            )
+
+            if descriptor.representsMountedDeveloperImage {
                 return true
             }
         }
@@ -2188,12 +2217,6 @@ extension IdeviceGateway {
     func dumpProfiles(docsPath: String) async throws -> String {
         try await withFFIDispatch {
             try self.syncDumpProfiles(docsPath: docsPath)
-        }
-    }
-
-    func performHeartbeat(interval: UInt64, newInterval: UnsafeMutablePointer<UInt64>) async throws {
-        try await withFFIDispatch {
-            try self.syncPerformHeartbeat(interval: interval, newInterval: newInterval)
         }
     }
 
