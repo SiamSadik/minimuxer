@@ -429,7 +429,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                 reason: "Lockdown session became unavailable"
             )
         ) {
-            try IdeviceGateway.shared.isDDIMounted()
+            try await IdeviceGateway.shared.isDDIMounted()
         }
     }
 
@@ -533,7 +533,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                 "Lockdown session became unavailable"
             )
         ) {
-            try IdeviceGateway.shared.installProvisioningProfile(profile: profile)
+            try await IdeviceGateway.shared.installProvisioningProfile(profile: profile)
         }
     }
 
@@ -543,7 +543,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                 "Lockdown session became unavailable"
             )
         ) {
-            try IdeviceGateway.shared.removeProvisioningProfile(id: id)
+            try await IdeviceGateway.shared.removeProvisioningProfile(id: id)
         }
     }
 
