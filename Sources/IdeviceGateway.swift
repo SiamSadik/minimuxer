@@ -105,12 +105,6 @@ internal final class IdeviceGateway {
             throw IdeviceGatewayError.invalidPairingFile(reason: "The file could not be parsed as a property list (plist).")
         }
 
-        let requiredRPKeys = ["private_key", "public_key", "identifier"]
-        let missingRPKeys = requiredRPKeys.filter { plist[$0] == nil }
-        if missingRPKeys.isEmpty {
-            return .rppairing
-        }
-
         let requiredLockdownKeys = [
             "WiFiMACAddress", "SystemBUID", "RootPrivateKey", "HostPrivateKey",
             "HostID", "RootCertificate", "UDID", "EscrowBag", "HostCertificate",
@@ -118,7 +112,19 @@ internal final class IdeviceGateway {
         ]
         let missingLockdownKeys = requiredLockdownKeys.filter { plist[$0] == nil }
         if missingLockdownKeys.isEmpty {
+            // Prefer the classic Lockdown path whenever a complete lockdown record exists
+            // (e.g. iLoader-generated files that ALSO embed RP keys). The RP/RSD tunnel
+            // path (tunnel_create_rppairing) is the 0.6.4 rewrite that regressed on newer
+            // iOS: the final TCP connect to the device-created tunnel listener fails
+            // ("TLS tunnel: device socket io failed"), whereas classic lockdown over
+            // port 62078 (the 0.6.3-era path) works on iOS 26/27.
             return .lockdown
+        }
+
+        let requiredRPKeys = ["private_key", "public_key", "identifier"]
+        let missingRPKeys = requiredRPKeys.filter { plist[$0] == nil }
+        if missingRPKeys.isEmpty {
+            return .rppairing
         }
 
         throw IdeviceGatewayError.invalidPairingFile(
