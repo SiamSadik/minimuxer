@@ -92,11 +92,20 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                     return .failure(.noVPN("No utun interface detected — LocalDevVPN is not connected"))
                 }
 
-                // check iKEv2 too if in lockdown mode and ios >= 26.4
+                // On iOS 26.4 the lockdown protocol requires an IPSec/IKEv2 interface —
+                // utun-only tunnels get dropped, so we hard-gate there (the documented
+                // workaround is connecting an IKEv2 VPN like AdGuard VPN alongside
+                // LocalDevVPN). On iOS 27 the classic lockdown path over a plain utun
+                // works again (0.6.3-era behavior, confirmed working on 27 DB3 by users), so
+                // on 27+ we attempt the connection anyway and only log a warning.
                 if !isrppairing && !net.isIKEv2IPSecAvailable {
                     if #available(iOS 26.4, *) {
-                        debugLog("[minimuxer] minimuxer not ready: no ipsec interface (required for lockdown on iOS 26.4+)")
-                        return .failure(.invalidVPN("utun is present but no ipsec/IKEv2 interface found — LocalDevVPN may not support the lockdown protocol on iOS 26.4+"))
+                        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
+                            debugLog("[minimuxer] iOS 27+ lockdown: no ipsec interface present, attempting lockdown over utun anyway (0.6.3-era behavior)")
+                        } else {
+                            debugLog("[minimuxer] minimuxer not ready: no ipsec interface (required for lockdown on iOS 26.4)")
+                            return .failure(.invalidVPN("utun is present but no ipsec/IKEv2 interface found — LocalDevVPN may not support the lockdown protocol on iOS 26.4"))
+                        }
                     }
                 }
 
