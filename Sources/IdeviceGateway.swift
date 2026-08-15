@@ -224,9 +224,21 @@ internal final class IdeviceGateway {
         #endif
     }
 
+    /// Raises the idevice FFI global network timeout from its 5s default.
+    /// The RSD tunnel handshake (tunnel_create_rppairing) performs a second TCP
+    /// connection to a device-created tunnel port; on newer iOS versions the
+    /// device can take longer than 5s to accept it, which previously surfaced as
+    /// "TLS tunnel: Operation Timeout" (code 16) and broke refresh with
+    /// "Unable to manage profiles on the device".
+    func raiseGlobalTimeout(seconds: UInt64 = 60) {
+        debugLog("[IdeviceGateway] raiseGlobalTimeout(\(seconds)s) called")
+        idevice_set_global_timeout(seconds)
+    }
+
     private func syncStart(pairingFileContent: String) throws {
         debugLog("[IdeviceGateway] start() called, pairingFileContent length: \(pairingFileContent.count)")
         cleanup()
+        raiseGlobalTimeout()
         
         #if DEBUG
         setLogging(true)
@@ -305,49 +317,70 @@ internal final class IdeviceGateway {
         addr.sin_addr.s_addr = inet_addr(deviceEndpointIp)
 
         let hostname = MinimuxerConstants.appName
-        var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
 
-        verboseLog("[IdeviceGateway] ensureRPConnection() calling tunnel_create_rppairing with deviceEndpointIp: \(deviceEndpointIp)")
-        try hostname.withCString { hostPtr in
-            withUnsafePointer(to: &addr) { addrPtr in
-                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    err = tunnel_create_rppairing(
-                        sockaddrPtr,
-                        socklen_t(MemoryLayout<sockaddr_in>.size),
-                        hostPtr,
-                        pairingFile,
-                        nil,
-                        nil,
-                        &adapter,
-                        &handshake
-                    )
+        // Retry transient handshake/connection failures (e.g. remoted still starting, or a stale
+        // tunnel endpoint after a VPN reconnect) with a short backoff. Pairing/auth errors are
+        // permanent and are NOT retried.
+        let maxAttempts = 3
+        var lastError: IdeviceGatewayError? = nil
+
+        for attempt in 1...maxAttempts {
+            var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
+            verboseLog("[IdeviceGateway] ensureRPConnection() attempt \(attempt)/\(maxAttempts) calling tunnel_create_rppairing with deviceEndpointIp: \(deviceEndpointIp)")
+            try hostname.withCString { hostPtr in
+                withUnsafePointer(to: &addr) { addrPtr in
+                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        err = tunnel_create_rppairing(
+                            sockaddrPtr,
+                            socklen_t(MemoryLayout<sockaddr_in>.size),
+                            hostPtr,
+                            pairingFile,
+                            nil,
+                            nil,
+                            &adapter,
+                            &handshake
+                        )
+                    }
                 }
             }
-        }
 
-        if let err = err {
-            let ffiErr = err.pointee
-            let code = ffiErr.code
-            let subCode = ffiErr.sub_code
-            var msg = ""
-            if let msgPtr = ffiErr.message {
-                msg = String(cString: msgPtr)
-            }
-            debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing failed with code: \(code), subCode: \(subCode), message: \(msg)")
-            defer { idevice_error_free(err) }
-            
-            if isPairingError(err) {
-                let reason = "Handshake failed: \(msg.isEmpty ? "Unknown FFI error" : msg)"
-                let error = IdeviceGatewayError.invalidPairingFile(reason: reason)
-                lastError = error
-                throw error
-            } else {
+            if let err = err {
+                let ffiErr = err.pointee
+                let code = ffiErr.code
+                let subCode = ffiErr.sub_code
+                var msg = ""
+                if let msgPtr = ffiErr.message {
+                    msg = String(cString: msgPtr)
+                }
+                debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing failed with code: \(code), subCode: \(subCode), message: \(msg)")
+                defer { idevice_error_free(err) }
+
+                if isPairingError(err) {
+                    // Permanent pairing/auth failure — do not retry.
+                    let reason = "Handshake failed: \(msg.isEmpty ? "Unknown FFI error" : msg)"
+                    let error = IdeviceGatewayError.invalidPairingFile(reason: reason)
+                    lastError = error
+                    throw error
+                }
+
                 let error = IdeviceGatewayError.connectionFailed(msg.isEmpty ? "Tunnel creation failed" : msg)
                 lastError = error
-                throw error
+                if attempt < maxAttempts {
+                    let delay = 0.5 * TimeInterval(attempt)
+                    debugLog("[IdeviceGateway] ensureRPConnection() retrying in \(delay)s...")
+                    Thread.sleep(forTimeInterval: delay)
+                }
+                continue
             }
+
+            debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing succeeded, adapter: \(String(describing: adapter)), handshake: \(String(describing: handshake))")
+            return
         }
-        debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing succeeded, adapter: \(String(describing: adapter)), handshake: \(String(describing: handshake))")
+
+        if let lastError = lastError {
+            throw lastError
+        }
+        throw IdeviceGatewayError.connectionFailed("Tunnel creation failed")
     }
 
     private func isPairingError(_ err: UnsafeMutablePointer<IdeviceFfiError>) -> Bool {
