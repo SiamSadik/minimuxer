@@ -21,6 +21,17 @@ private func ipv4String(_ value: UInt32) -> String? {
 }
 
 @inline(__always)
+private func ipv4ToUInt32(_ ipString: String) -> UInt32? {
+    let components = ipString.split(separator: ".")
+    guard components.count == 4,
+          let b1 = UInt32(components[0]),
+          let b2 = UInt32(components[1]),
+          let b3 = UInt32(components[2]),
+          let b4 = UInt32(components[3]) else { return nil }
+    return (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
+}
+
+@inline(__always)
 private func sockaddrIPv4(_ sa: inout sockaddr) -> UInt32? {
     var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
     guard getnameinfo(&sa, socklen_t(sa.sa_len), &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0,
@@ -207,7 +218,21 @@ actor NetworkIfaceScanner {
                   • override peer reachable: \(isOverridePeerIpReachable)
                 
                 """)
-
+                // Since iOS 26.4 lockdown rejects device connections that arrive over the utun
+                // tunnel unless the tunnel's source IP falls inside the WiFi subnet. Warn loudly
+                // when the tunnel peer is outside the LAN subnet so the fix is unambiguous.
+                if let lanIface = probableLAN(),
+                   let peerIp = overridePeerIp ?? derivedPeerIp,
+                   let peer = ipv4ToUInt32(peerIp) {
+                    let peerInLANSubnet = (peer & lanIface.mask) == lanIface.networkBase
+                    if !peerInLANSubnet {
+                        debugLog("""
+                        [minimuxer] WARNING: TUNNEL IP OUTSIDE WIFI SUBNET - tunnel peer \(peerIp) is NOT inside the WiFi subnet \(ipv4String(lanIface.networkBase) ?? "?")/\(lanIface.maskIP) (WiFi IP \(lanIface.hostIP)).
+                        Since iOS 26.4, lockdown rejects device connections that arrive over the utun tunnel unless the tunnel's source IP falls inside the WiFi subnet.
+                        Fix: LocalDevVPN -> Settings -> Network Configuration: set \"Tunnel IP\" and \"Device IP\" to free addresses inside this subnet (e.g. \(lanIface.hostIP) with a different last octet, or 192.168.0.200 / 192.168.0.201), keep subnet mask 255.255.255.0, then set SideStore's tunnel peer override to the new \"Device IP\", reconnect the tunnel, and force-close SideStore.
+                        """)
+                    }
+                }
 
             case .remoteServer:
                 let rawServerIp = connectionConfigCache?.getRemoteServerIp()
