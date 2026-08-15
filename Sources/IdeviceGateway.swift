@@ -701,6 +701,70 @@ internal final class IdeviceGateway {
         return try action(client)
     }
 
+    /// Attempts to switch the active protocol from Lockdown (TCP 62078) to Remote Pairing
+    /// (RSD tunnel) using the SAME pairing file, when that file also carries RP keys.
+    /// On some iOS 27 builds the device drops Lockdown service sessions that arrive over an
+    /// app-created utun tunnel (Broken pipe / early eof) while accepting the RSD tunnel path
+    /// (or vice versa) — this fallback lets a single install try both protocols.
+    @discardableResult
+    private func trySwitchToRP() -> Bool {
+        guard !isRPPairing else { return false }
+        guard let pairingFileData = self.pairingFileData else {
+            debugLog("[IdeviceGateway] trySwitchToRP() skipped: no pairingFileData")
+            return false
+        }
+        guard let plist = try? PropertyListSerialization.propertyList(from: pairingFileData, options: [], format: nil) as? [String: Any] else {
+            debugLog("[IdeviceGateway] trySwitchToRP() skipped: could not re-parse pairing plist")
+            return false
+        }
+        let requiredRPKeys = ["private_key", "public_key", "identifier"]
+        guard requiredRPKeys.allSatisfy({ plist[$0] != nil }) else {
+            debugLog("[IdeviceGateway] trySwitchToRP() skipped: pairing file has no RP keys")
+            return false
+        }
+
+        // Free the Lockdown-form pairing file and reload the same bytes as an RP pairing file.
+        if let pairingFile = self.pairingFile {
+            idevice_pairing_file_free(pairingFile)
+            self.pairingFile = nil
+        }
+        invalidateConnection()
+
+        do {
+            try pairingFileData.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+                if let baseAddress = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                    let err = rp_pairing_file_from_bytes(baseAddress, UInt(pairingFileData.count), &self.pairingFile)
+                    if let err = err {
+                        debugLog("[IdeviceGateway] trySwitchToRP() rp_pairing_file_from_bytes failed")
+                        idevice_error_free(err)
+                        throw IdeviceGatewayError.invalidPairingFile(reason: "rp_pairing_file_from_bytes failed during protocol fallback")
+                    }
+                }
+            }
+        } catch {
+            debugLog("[IdeviceGateway] trySwitchToRP() failed to load RP pairing file: \(error)")
+            return false
+        }
+        isRPPairing = true
+        pairingFileType = .rppairing
+        debugLog("[IdeviceGateway] trySwitchToRP() switched to .rppairing (RSD tunnel) mode")
+        return true
+    }
+
+    /// Whether a thrown error means the connection itself failed (as opposed to a pairing/auth
+    /// problem). Only connection-type errors trigger the Lockdown→RP protocol fallback.
+    private func isConnectionTypeError(_ error: Error) -> Bool {
+        if let gatewayError = error as? IdeviceGatewayError {
+            switch gatewayError {
+            case .invalidPairingFile, .notInitialized:
+                return false
+            case .connectionFailed, .serviceError, .noConnection, .deviceEndpointIpNotAvailable:
+                return true
+            }
+        }
+        return false
+    }
+
     private func performWithEitherService<T>(
         connectRP: @escaping (OpaquePointer?, OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
         connectLockdown: @escaping (OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
@@ -709,6 +773,27 @@ internal final class IdeviceGateway {
         action: (OpaquePointer) throws -> T
     ) throws -> T {
         debugLog("[IdeviceGateway] performWithEitherService(\(serviceName)) started, isRPPairing: \(isRPPairing) (mode = .\(pairingFileType))")
+        do {
+            return try performWithPrimaryService(connectRP: connectRP, connectLockdown: connectLockdown, cleanup: cleanup, serviceName: serviceName, action: action)
+        } catch {
+            // The primary protocol's connection failed (e.g. iOS 27 dropping Lockdown sessions
+            // over the app utun). If this file also carries RP keys, flip to Remote Pairing once
+            // and retry the SAME operation — one install that tries both protocols.
+            if isConnectionTypeError(error) && trySwitchToRP() {
+                debugLog("[IdeviceGateway] performWithEitherService(\(serviceName)) primary mode failed with: \(error). Falling back to .rppairing and retrying...")
+                return try performWithPrimaryService(connectRP: connectRP, connectLockdown: connectLockdown, cleanup: cleanup, serviceName: serviceName, action: action)
+            }
+            throw error
+        }
+    }
+
+    private func performWithPrimaryService<T>(
+        connectRP: @escaping (OpaquePointer?, OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
+        connectLockdown: @escaping (OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
+        cleanup: @escaping (OpaquePointer?) -> Void,
+        serviceName: String,
+        action: (OpaquePointer) throws -> T
+    ) throws -> T {
         if isRPPairing {
             return try performWithService(connect: connectRP, cleanup: cleanup, serviceName: serviceName, action: action)
         } else {
