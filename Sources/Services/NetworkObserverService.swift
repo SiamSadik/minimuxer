@@ -107,9 +107,19 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
             // connections there; lockdown 62078 does not).
             IdeviceGateway.rsdBypassCandidate = try? await NetworkIfaceScanner.shared.lanIfaceIP()
 
-            if let lanIP = IdeviceGateway.rsdBypassCandidate,
-               let peerIP,
-               LockdownSourceRelay.start(source: lanIP, upstream: peerIP) {
+            if EmbeddedTunnelService.shared.didStart {
+                // IN-IPA (embedded in-subnet) tunnel: connect DIRECTLY to the utun
+                // peer. The source-bind relay would hand lockdownd the device's OWN
+                // WiFi IP as the connection source — the anti-self half of the iOS
+                // 26.4+ check kills that. Only the direct path's post-rewrite source
+                // (wifiIP + 2) is both inside the WiFi subnet AND not one of the
+                // device's own addresses, so both halves of the check pass.
+                verboseLog("[minimuxer] [net] IN-IPA TUNNEL active — connecting directly to utun peer \(peerIP ?? "nil") (source-bind relay skipped)")
+                LockdownSourceRelay.stop()
+                await apply(peerIP)
+            } else if let lanIP = IdeviceGateway.rsdBypassCandidate,
+                      let peerIP,
+                      LockdownSourceRelay.start(source: lanIP, upstream: peerIP) {
                 verboseLog("[minimuxer] [net] SOURCE-BIND RELAY active — lockdown via 127.0.0.1:62078 -> \(peerIP ?? "?") with source bound to \(lanIP) (inside WiFi subnet)")
                 await apply("127.0.0.1")
             } else {

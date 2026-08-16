@@ -39,7 +39,6 @@ final internal class EmbeddedTunnelService: @unchecked Sendable {
 
     private static let utunAddressOffset: UInt32 = 1   // utun address = wifiIP + 1
     private static let peerAddressOffset: UInt32 = 2   // peer (fake IP) = wifiIP + 2
-    private static let subnetMask = "255.255.255.0"
 
     private init() {}
 
@@ -113,9 +112,10 @@ final internal class EmbeddedTunnelService: @unchecked Sendable {
         protocolConfiguration.providerBundleIdentifier = providerBundleID
         protocolConfiguration.serverAddress = peerIP
         protocolConfiguration.providerConfiguration = [
+            // Keys read by the embedded LocalDevVPN-style provider; the provider
+            // forces /32 address + routes itself, so no subnet mask is needed.
             "TunnelDeviceIP": tunnelIP,
             "TunnelFakeIP": peerIP,
-            "SubnetMask": Self.subnetMask,
         ]
 
         manager.protocolConfiguration = protocolConfiguration
