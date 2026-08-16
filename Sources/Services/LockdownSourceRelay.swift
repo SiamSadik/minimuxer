@@ -31,6 +31,11 @@ final class LockdownSourceRelay {
 
     static private(set) var isListening = false
 
+    /// Human-readable reason for the last failed start() (e.g. the loopback
+    /// listener EADDRINUSE that has blocked this relay on every run so far) so
+    /// the fallback log line in NetworkObserverService can tell the truth.
+    static private(set) var lastFailure: String? = nil
+
     private static var listenSocket: Int32 = -1
     private static var serverThread: Thread? = nil
     private static var upstreamIP: String? = nil
@@ -100,6 +105,7 @@ final class LockdownSourceRelay {
             }
             guard bindResult == 0, listen(fd, 16) == 0 else {
                 debugLog("[minimuxer] [relay] WARN: bind/listen 127.0.0.1:\(port) failed (errno=\(errno))")
+                lastFailure = "bind/listen 127.0.0.1:\(port) failed (errno=\(errno))"
                 close(fd)
                 usleep(500_000)
                 continue

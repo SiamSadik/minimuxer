@@ -79,9 +79,18 @@ internal struct NetInfo: Hashable, CustomStringConvertible, Sendable {
     var derivedPeer: String? {
         guard let peer = reportedPeer, peer == hostIP else { return nil }
         let netBase = host & mask
-        let firstHost = netBase + 1
-        if firstHost != host {
-            return ipv4String(firstHost)
+        // LocalDevVPN keeps the utun as a SELF-destination (its tunnel remote
+        // address equals its own device IP), so the real peer — the fake IP
+        // where the device's lockdown/RSD services listen through the tunnel —
+        // is NOT the route gateway. It follows the convention device IP + 1:
+        //   default:    10.7.0.0  -> 10.7.0.1
+        //   in-subnet:  192.168.0.50 -> 192.168.0.51
+        // The old netBase+1 rule only matched when the device IP happened to be
+        // the network base (10.7.0.0/24) and derives the LAN ROUTER
+        // (192.168.0.1) for in-subnet tunnels, where lockdown never listens.
+        let nextHost = host + 1
+        if nextHost != host {
+            return ipv4String(nextHost)
         } else {
             return ipv4String(netBase + 2)
         }
