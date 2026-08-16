@@ -341,75 +341,82 @@ internal final class IdeviceGateway {
             throw IdeviceGatewayError.tunnelPeerIpNotAvailable
         }
 
-        // RSD-BYPASS: prefer an IN-SUBNET RSD endpoint so the RemotePairing TLS
-        // tunnel's source passes the iOS 26.4+ lockdown source-IP check. Order:
-        // device's own WiFi IP (proven CONNECTED for RSD 49152) -> loopback
-        // (CONNECTED) -> the utun tunnel peer (status quo, out-of-subnet source
-        // -> "TLS tunnel: Operation Timeout" on iOS 26.4+).
-        let rsdEndpoint: String
-        var usedFallbackReason: String? = nil
-        if let bypass = Self.rsdBypassCandidate, Self.isTcpReachable(bypass, port: MinimuxerConstants.rsdPort) {
-            rsdEndpoint = bypass
-        } else if Self.isTcpReachable("127.0.0.1", port: MinimuxerConstants.rsdPort) {
-            rsdEndpoint = "127.0.0.1"
-        } else {
-            rsdEndpoint = tunnelPeerIp
-            usedFallbackReason = (Self.rsdBypassCandidate == nil)
-                ? "no WiFi IP cached"
-                : "WiFi IP \(Self.rsdBypassCandidate!) not reachable on 49152"
-        }
-        verboseLog("[IdeviceGateway] RSD-BYPASS endpoint: \(rsdEndpoint):49152\(usedFallbackReason.map { " (fallback: \($0))" } ?? "")")
-
-        // Standard RPPairing socket address
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = MinimuxerConstants.rsdPort.bigEndian
-        addr.sin_addr.s_addr = inet_addr(rsdEndpoint)
+        // RSD-BYPASS: try each RSD endpoint in order until tunnel_create_rppairing
+        // SUCCEEDS. A TCP probe alone cannot detect a refused handshake (the WiFi
+        // IP probe passes but the RemotePairing daemon RSTs the handshake because
+        // the source is the device's own address). Order:
+        //   1. 127.0.0.1 (loopback) — NOT a utun/VPN path (the iOS 26.4+ utun-subnet
+        //      check doesn't apply) and NOT one of the device's LAN addresses (the
+        //      daemon's anti-self check shouldn't fire). Probes: CONNECTED.
+        //   2. the device's own WiFi IP — in-subnet source, but the daemon refuses
+        //      self-sourced handshakes (proven: Connection reset by peer).
+        //   3. the utun tunnel peer — status quo; the VPN rewrites the source to
+        //      the fake peer (10.7.0.1), out-of-subnet -> TLS tunnel timeout.
+        let candidates: [String] = [
+            "127.0.0.1",
+            Self.rsdBypassCandidate ?? "",
+            tunnelPeerIp
+        ].filter { !$0.isEmpty }
 
         let hostname = MinimuxerConstants.appName
-        var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
+        var lastAttempt: Error? = nil
 
-        verboseLog("[IdeviceGateway] ensureRPConnection() calling tunnel_create_rppairing with endpoint: \(rsdEndpoint)")
-        try hostname.withCString { hostPtr in
-            withUnsafePointer(to: &addr) { addrPtr in
-                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    err = tunnel_create_rppairing(
-                        sockaddrPtr,
-                        socklen_t(MemoryLayout<sockaddr_in>.size),
-                        hostPtr,
-                        pairingFile,
-                        nil,
-                        nil,
-                        &adapter,
-                        &handshake
-                    )
+        for endpoint in candidates {
+            guard Self.isTcpReachable(endpoint, port: MinimuxerConstants.rsdPort) else {
+                verboseLog("[IdeviceGateway] RSD-BYPASS candidate \(endpoint):49152 not reachable — skipping")
+                continue
+            }
+            adapter = nil
+            handshake = nil
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = MinimuxerConstants.rsdPort.bigEndian
+            addr.sin_addr.s_addr = inet_addr(endpoint)
+
+            var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
+            verboseLog("[IdeviceGateway] RSD-BYPASS trying \(endpoint):49152 (tunnel_create_rppairing)")
+            try hostname.withCString { hostPtr in
+                withUnsafePointer(to: &addr) { addrPtr in
+                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        err = tunnel_create_rppairing(
+                            sockaddrPtr,
+                            socklen_t(MemoryLayout<sockaddr_in>.size),
+                            hostPtr,
+                            pairingFile,
+                            nil,
+                            nil,
+                            &adapter,
+                            &handshake
+                        )
+                    }
                 }
             }
+
+            if let err = err {
+                let ffiErr = err.pointee
+                let code = ffiErr.code
+                let subCode = ffiErr.sub_code
+                var msg = ""
+                if let msgPtr = ffiErr.message {
+                    msg = String(cString: msgPtr)
+                }
+                defer { idevice_error_free(err) }
+                debugLog("[IdeviceGateway] RSD-BYPASS \(endpoint):49152 failed — code: \(code), subCode: \(subCode), message: \(msg)")
+                if isPairingError(err) {
+                    lastAttempt = IdeviceGatewayError.invalidPairingFile(reason: "Handshake failed: \(msg.isEmpty ? "Unknown FFI error" : msg)")
+                } else {
+                    lastAttempt = IdeviceGatewayError.connectionFailed(msg.isEmpty ? "Tunnel creation failed" : msg)
+                }
+                continue
+            }
+            verboseLog("[IdeviceGateway] RSD-BYPASS tunnel_create_rppairing SUCCEEDED via \(endpoint):49152 — adapter: \(String(describing: adapter)), handshake: \(String(describing: handshake))")
+            return
         }
 
-        if let err = err {
-            let ffiErr = err.pointee
-            let code = ffiErr.code
-            let subCode = ffiErr.sub_code
-            var msg = ""
-            if let msgPtr = ffiErr.message {
-                msg = String(cString: msgPtr)
-            }
-            debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing failed with code: \(code), subCode: \(subCode), message: \(msg)")
-            defer { idevice_error_free(err) }
-            
-            if isPairingError(err) {
-                let reason = "Handshake failed: \(msg.isEmpty ? "Unknown FFI error" : msg)"
-                let error = IdeviceGatewayError.invalidPairingFile(reason: reason)
-                lastError = error
-                throw error
-            } else {
-                let error = IdeviceGatewayError.connectionFailed(msg.isEmpty ? "Tunnel creation failed" : msg)
-                lastError = error
-                throw error
-            }
-        }
-        debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing succeeded, adapter: \(String(describing: adapter)), handshake: \(String(describing: handshake))")
+        debugLog("[IdeviceGateway] ensureRPConnection() all RSD-BYPASS endpoints failed — last: \(String(describing: lastAttempt))")
+        let failure = lastAttempt ?? IdeviceGatewayError.connectionFailed("All RSD endpoints failed")
+        lastError = failure
+        throw failure
     }
 
     private func isPairingError(_ err: UnsafeMutablePointer<IdeviceFfiError>) -> Bool {
