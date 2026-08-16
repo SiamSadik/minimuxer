@@ -46,9 +46,20 @@ final internal class EmbeddedTunnelService: @unchecked Sendable {
     /// The bundle identifier of the host app's packet-tunnel provider, resolved
     /// at runtime so the team-ID suffix that iLoader appends
     /// (com.kdt.livecontainer.<TEAMID>.TunnelProv) is handled automatically.
+    ///
+    /// macOS exposes `builtInPlugInsURLs` (the appex URLs); iOS exposes only
+    /// `builtInPlugInsURL` (the PlugIns directory), so enumerate it manually.
     func packetTunnelProviderBundleID() -> String? {
-        guard let plugIns = Bundle.main.builtInPlugInsURLs else { return nil }
-        for url in plugIns where url.pathExtension == "appex" {
+        var plugInURLs: [URL] = []
+        #if os(macOS)
+        plugInURLs = Bundle.main.builtInPlugInsURLs ?? []
+        #else
+        if let dir = Bundle.main.builtInPlugInsURL,
+           let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            plugInURLs = urls
+        }
+        #endif
+        for url in plugInURLs where url.pathExtension == "appex" {
             guard let info = Bundle(url: url)?.infoDictionary else { continue }
             guard let ext = info["NSExtension"] as? [String: Any],
                   let point = ext["NSExtensionPointIdentifier"] as? String,
