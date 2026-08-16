@@ -217,7 +217,20 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     
     
     func start(pairingFile: String, mountPath: String) async throws {
+        // IN-IPA TUNNEL: bring up the embedded packet-tunnel provider (if the
+        // host app ships one and was signed with the Network Extensions
+        // entitlement) BEFORE the network monitor derives the peer, so the utun
+        // with in-subnet IPs + /32 peer route exists first. Clean no-op when the
+        // app has no embedded extension (external VPN path unchanged).
+        await EmbeddedTunnelService.shared.startIfAvailable()
+
         await Minimuxer.network.start()
+
+        // If the embedded tunnel came up, derive the peer endpoint now instead
+        // of waiting for a path-change event that may not fire for the new utun.
+        if EmbeddedTunnelService.shared.didStart {
+            await Minimuxer.network.refreshEndpoint()
+        }
         
         // actor serialization scope
         try await state.with{
