@@ -77,10 +77,11 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                 if #available(iOS 26.4, *) {
                     if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
                         // iOS 27 works with classic lockdown over a plain utun (0.6.3-era
-                        // behavior) and with the tunnel-bypass endpoint (device's own WiFi
-                        // IP), which never touches the utun at all — so the ipsec gate is
+                        // behavior) and with the source-bind relay (127.0.0.1 -> utun peer
+                        // with the device's own WiFi IP as the socket source, so the
+                        // source-IP check sees an in-subnet address) — the ipsec gate is
                         // a warning only on 27+.
-                        debugLog("[minimuxer] iOS 27+ lockdown: no ipsec interface present, attempting lockdown over WiFi IP anyway (tunnel-bypass)")
+                        debugLog("[minimuxer] iOS 27+ lockdown: no ipsec interface present, attempting lockdown via source-bind relay anyway")
                     } else {
                         debugLog("[minimuxer] minimuxer not ready: no ipsec interface (required for lockdown on iOS 26.4)")
                         return .failure(.invalidVPN("utun is present but no ipsec/IKEv2 interface found — LocalDevVPN may not support the lockdown protocol on iOS 26.4"))

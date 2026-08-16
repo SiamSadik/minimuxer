@@ -90,26 +90,34 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
                 }
             }
 
-            // TUNNEL BYPASS: reach lockdown services over the device's OWN WiFi IP
-            // instead of the utun tunnel peer. Since iOS 26.4, lockdown rejects
-            // connections that arrive over the tunnel unless the source IP falls
-            // inside the WiFi subnet; a self-connection to our own WiFi IP keeps the
-            // source inside the subnet and never touches the utun at all. Works with
-            // the App Store LocalDevVPN at its DEFAULT config (10.7.0.0 / 10.7.0.1)
-            // and a fresh pairing file — no VPN settings changes required.
+            // SOURCE-BIND FIX (replaces the tunnel-bypass experiment): the on-device
+            // probe matrix proved lockdownd 62078 is EPERM on EVERY local address
+            // (own WiFi IP, loopback, utun device IP) and reachable ONLY at the utun
+            // peer 10.7.0.1 — so the WiFi-IP bypass was aimed at a dead listener.
+            // The old broken-pipe happened AFTER the TCP accept: lockdownd accepts
+            // the connection over the utun, then the iOS 26.4+ source-IP check kills
+            // the session because the source seen by lockdownd (the device's own
+            // utun address, 10.7.0.0) is NOT inside the WiFi subnet (192.168.0.0/24).
+            // FIX: keep the destination at the utun peer but BIND the socket source
+            // to the device's own WiFi IP (inside the subnet) via a local relay —
+            // the FFI connects to 127.0.0.1:62078, the relay opens a source-bound
+            // socket to 10.7.0.1:62078 and splices bytes. No router / VPN changes.
             if let lanIP = try? await NetworkIfaceScanner.shared.lanIfaceIP(),
-               Minimuxer.shared.testDeviceConnection(ifaddr: lanIP) {
-                verboseLog("[minimuxer] [net] TUNNEL BYPASS active — targeting device's own WiFi IP \(lanIP) for lockdown services (utun peer \(peerIP ?? "nil") ignored)")
-                await apply(lanIP)
+               let peerIP,
+               LockdownSourceRelay.start(source: lanIP, upstream: peerIP) {
+                verboseLog("[minimuxer] [net] SOURCE-BIND RELAY active — lockdown via 127.0.0.1:62078 -> \(peerIP ?? "?") with source bound to \(lanIP) (inside WiFi subnet)")
+                await apply("127.0.0.1")
             } else {
                 let reason = (try? await NetworkIfaceScanner.shared.lanIfaceIP())
-                    .map { "own WiFi IP \($0) not reachable" }
+                    .map { "own WiFi IP \($0) unavailable for source bind" }
                     ?? "no routable WiFi (en*) interface found"
-                verboseLog("[minimuxer] [net] TUNNEL BYPASS not available (\(reason)) — falling back to utun peer \(peerIP ?? "nil")")
+                verboseLog("[minimuxer] [net] SOURCE-BIND relay not available (\(reason)) — falling back to utun peer \(peerIP ?? "nil")")
+                LockdownSourceRelay.stop()
                 await apply(peerIP)
             }
         } else {
             verboseLog("[minimuxer] [net] no SideVPN endpoint detected")
+            LockdownSourceRelay.stop()
             await TunnelPeer.shared.clear()
             MuxerService.notifyDeviceDetached()
         }

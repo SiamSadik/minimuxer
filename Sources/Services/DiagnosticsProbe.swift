@@ -242,7 +242,7 @@ final class DiagnosticsProbe {
     }
 
     func runSuite() async {
-        verboseLog("[minimuxer] [diag] ============ TUNNEL-BYPASS-DIAG DIAG-PROBE-SUITE-v1 ============")
+        verboseLog("[minimuxer] [diag] ============ SOURCE-BIND-DIAG DIAG-PROBE-SUITE-v2 ============")
         let os = ProcessInfo.processInfo.operatingSystemVersion
         verboseLog("[minimuxer] [diag] iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) — pairing loaded: \(IdeviceGateway.shared.pairingFileData != nil) — gateway peer: \(IdeviceGateway.shared.currentTunnelPeerIp ?? "nil")")
 
@@ -277,10 +277,24 @@ final class DiagnosticsProbe {
                 ProbeSpec(label: "utun-peer lockdown 62078", ip: utunPeer, port: 62078, bindSource: nil),
                 ProbeSpec(label: "utun-peer rsd 49152", ip: utunPeer, port: 49152, bindSource: nil)
             ]
+            if let wifiIP {
+                // SOURCE-BIND probes: bind the socket source to the device's own WiFi
+                // IP (inside 192.168.0.0/24) and connect to the utun peer. If lockdownd
+                // accepts, the source-IP check is satisfiable purely from the app —
+                // the LockdownSourceRelay (127.0.0.1:62078 -> peer with WiFi source)
+                // should then pass the lockdown handshake.
+                specs += [
+                    ProbeSpec(label: "utun-peer lockdown 62078 bound-wifi", ip: utunPeer, port: 62078, bindSource: wifiIP),
+                    ProbeSpec(label: "utun-peer rsd 49152 bound-wifi", ip: utunPeer, port: 49152, bindSource: wifiIP)
+                ]
+            }
         }
         if let utunDevice {
             specs += [ProbeSpec(label: "utun-device lockdown 62078", ip: utunDevice, port: 62078, bindSource: nil)]
         }
+        // The source-bind relay itself, when running: the FFI connects to
+        // 127.0.0.1:62078 and the relay splices to the peer with a WiFi source.
+        specs += [ProbeSpec(label: "relay 127.0.0.1 lockdown", ip: "127.0.0.1", port: 62078, bindSource: nil)]
         if let gateway {
             specs += [
                 ProbeSpec(label: "gateway http 80", ip: gateway, port: 80, bindSource: nil),
@@ -327,7 +341,7 @@ final class DiagnosticsProbe {
 
         if let loopback = results["loopback lockdown 62078"] {
             if loopback.isConnected {
-                verboseLog("[minimuxer] [diag] VERDICT loopback-lockdown: 127.0.0.1:62078 CONNECTED -> lockdownd serves loopback -> running image-mounter round-trip via 127.0.0.1")
+                verboseLog("[minimuxer] [diag] VERDICT loopback-lockdown: 127.0.0.1:62078 CONNECTED -> lockdownd serves loopback (or the source-bind relay is listening) -> running image-mounter round-trip via 127.0.0.1")
                 IdeviceGateway.shared.setDiagnosticFFILogging(true)
                 let r = IdeviceGateway.shared.diagProbeImageMounterVia(ip: "127.0.0.1")
                 IdeviceGateway.shared.setDiagnosticFFILogging(false)
@@ -339,6 +353,22 @@ final class DiagnosticsProbe {
             }
         } else {
             verboseLog("[minimuxer] [diag] VERDICT loopback-lockdown: probe result missing")
+        }
+
+        if let boundWifi = results["utun-peer lockdown 62078 bound-wifi"] {
+            if boundWifi.isConnected {
+                verboseLog("[minimuxer] [diag] VERDICT source-bind: utun-peer 62078 with source bound to WiFi IP = CONNECTED -> source-IP check satisfiable from the app -> SOURCE-BIND RELAY fix should pass the lockdown handshake and mount the DDI")
+            } else if boundWifi.errnoValue == EPERM {
+                verboseLog("[minimuxer] [diag] VERDICT source-bind: utun-peer 62078 with source bound to WiFi IP = EPERM -> kernel/device refuses the WiFi-sourced connect even to the peer -> source-bind relay will fail too; router LAN -> 10.7.0.0/16 remains the only fix")
+            } else {
+                verboseLog("[minimuxer] [diag] VERDICT source-bind: utun-peer 62078 with source bound to WiFi IP -> \(boundWifi) -> source-bind path inconclusive")
+            }
+        } else {
+            verboseLog("[minimuxer] [diag] VERDICT source-bind: probe result missing")
+        }
+
+        if let relayProbe = results["relay 127.0.0.1 lockdown"] {
+            verboseLog("[minimuxer] [diag] VERDICT relay: 127.0.0.1:62078 (source-bind relay listener) -> \(relayProbe)")
         }
         verboseLog("[minimuxer] [diag] ============ END DIAG-PROBE-SUITE ============")
     }
