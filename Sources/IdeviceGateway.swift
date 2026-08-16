@@ -89,12 +89,6 @@ internal final class IdeviceGateway {
             throw IdeviceGatewayError.invalidPairingFile(reason: "The file could not be parsed as a property list (plist).")
         }
 
-        let requiredRPKeys = ["private_key", "public_key", "identifier"]
-        let missingRPKeys = requiredRPKeys.filter { plist[$0] == nil }
-        if missingRPKeys.isEmpty {
-            return .rppairing
-        }
-
         let requiredLockdownKeys = [
             "WiFiMACAddress", "SystemBUID", "RootPrivateKey", "HostPrivateKey",
             "HostID", "RootCertificate", "UDID", "EscrowBag", "HostCertificate",
@@ -102,7 +96,19 @@ internal final class IdeviceGateway {
         ]
         let missingLockdownKeys = requiredLockdownKeys.filter { plist[$0] == nil }
         if missingLockdownKeys.isEmpty {
+            // Prefer the classic Lockdown path whenever a complete lockdown record
+            // exists (e.g. iLoader-generated files that ALSO embed RP keys). The
+            // RP/RSD tunnel path (tunnel_create_rppairing) needs a device-created
+            // tunnel listener that newer iOS drops over the utun, and the
+            // tunnel-bypass endpoint (the device's own WiFi IP) only serves the
+            // classic lockdown port (62078).
             return .lockdown
+        }
+
+        let requiredRPKeys = ["private_key", "public_key", "identifier"]
+        let missingRPKeys = requiredRPKeys.filter { plist[$0] == nil }
+        if missingRPKeys.isEmpty {
+            return .rppairing
         }
 
         throw IdeviceGatewayError.invalidPairingFile(
@@ -208,9 +214,21 @@ internal final class IdeviceGateway {
         #endif
     }
 
+    /// Raises the idevice FFI global network timeout from its 5s default.
+    /// On newer iOS the lockdown daemon can take longer than 5s to accept a
+    /// connection on 62078 (especially over Wi-Fi on betas); a premature
+    /// timeout previously surfaced as "TLS tunnel: Operation Timeout"
+    /// (code 16) and broke refresh with "Unable to manage profiles on the
+    /// device".
+    func raiseGlobalTimeout(seconds: UInt64 = 60) {
+        debugLog("[IdeviceGateway] raiseGlobalTimeout(\(seconds)s) called")
+        idevice_set_global_timeout(seconds)
+    }
+
     func start(pairingFileContent: String) throws {
         debugLog("[IdeviceGateway] start() called, pairingFileContent length: \(pairingFileContent.count)")
         cleanup()
+        raiseGlobalTimeout()
         
         #if DEBUG
         setLogging(true)

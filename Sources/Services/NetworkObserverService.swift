@@ -78,14 +78,35 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
               • activePeer: \(peerIP ?? "nil")
             """)
 
-            if let peer = peerIP {
-                verboseLog("[minimuxer] [net] update tunnel peer IP with discovered peer on the vpn iface")
-                await TunnelPeer.shared.update(peer)
-                MuxerService.notifyDeviceAttached(tunnelPeerIp: peer)
+            func apply(_ endpoint: String?) async {
+                if let endpoint {
+                    verboseLog("[minimuxer] [net] update device endpoint: \(endpoint)")
+                    await TunnelPeer.shared.update(endpoint)
+                    MuxerService.notifyDeviceAttached(tunnelPeerIp: endpoint)
+                } else {
+                    verboseLog("[minimuxer] [net] peer not available for \(info.name)")
+                    await TunnelPeer.shared.clear()
+                    MuxerService.notifyDeviceDetached()
+                }
+            }
+
+            // TUNNEL BYPASS: reach lockdown services over the device's OWN WiFi IP
+            // instead of the utun tunnel peer. Since iOS 26.4, lockdown rejects
+            // connections that arrive over the tunnel unless the source IP falls
+            // inside the WiFi subnet; a self-connection to our own WiFi IP keeps the
+            // source inside the subnet and never touches the utun at all. Works with
+            // the App Store LocalDevVPN at its DEFAULT config (10.7.0.0 / 10.7.0.1)
+            // and a fresh pairing file — no VPN settings changes required.
+            if let lanIP = try? await NetworkIfaceScanner.shared.lanIfaceIP(),
+               Minimuxer.shared.testDeviceConnection(ifaddr: lanIP) {
+                verboseLog("[minimuxer] [net] TUNNEL BYPASS active — targeting device's own WiFi IP \(lanIP) for lockdown services (utun peer \(peerIP ?? "nil") ignored)")
+                await apply(lanIP)
             } else {
-                verboseLog("[minimuxer] [net] peer not available for \(info.name)")
-                await TunnelPeer.shared.clear()
-                MuxerService.notifyDeviceDetached()
+                let reason = (try? await NetworkIfaceScanner.shared.lanIfaceIP())
+                    .map { "own WiFi IP \($0) not reachable" }
+                    ?? "no routable WiFi (en*) interface found"
+                verboseLog("[minimuxer] [net] TUNNEL BYPASS not available (\(reason)) — falling back to utun peer \(peerIP ?? "nil")")
+                await apply(peerIP)
             }
         } else {
             verboseLog("[minimuxer] [net] no SideVPN endpoint detected")

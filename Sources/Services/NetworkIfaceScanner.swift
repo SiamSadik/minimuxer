@@ -180,9 +180,23 @@ actor NetworkIfaceScanner {
     }
 
     func probableLAN() throws -> NetInfo? {
-         try ensureReady()
-        return interfacesCache.first { $0.name.hasPrefix("en") }
-   }
+        try ensureReady()
+        // Prefer en0 (Wi-Fi). Fall back to any other active en* interface with a
+        // routable (non-link-local) IPv4 so USB-tethering/BridgeOS addresses
+        // (169.254.x) don't win.
+        if let en0 = interfacesCache.first(where: {
+            $0.name == "en0" && !$0.hostIP.hasPrefix("169.254.")
+        }) {
+            return en0
+        }
+        return interfacesCache.first { $0.name.hasPrefix("en") && !$0.hostIP.hasPrefix("169.254.") }
+    }
+
+    /// The device's own routable LAN (Wi-Fi) IPv4 — used by the tunnel-bypass path
+    /// to reach lockdown services over the WiFi interface instead of the utun tunnel.
+    func lanIfaceIP() throws -> String? {
+        try probableLAN()?.hostIP
+    }
 
     // MARK: scan
     static func scan(quiet: Bool = false) -> Set<NetInfo> {
