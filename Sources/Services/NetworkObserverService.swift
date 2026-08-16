@@ -108,10 +108,10 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
                 verboseLog("[minimuxer] [net] SOURCE-BIND RELAY active — lockdown via 127.0.0.1:62078 -> \(peerIP ?? "?") with source bound to \(lanIP) (inside WiFi subnet)")
                 await apply("127.0.0.1")
             } else {
+                let lanIP = try? await NetworkIfaceScanner.shared.lanIfaceIP()
                 let reason = LockdownSourceRelay.lastFailure
-                    ?? (try? await NetworkIfaceScanner.shared.lanIfaceIP())
-                        .map { "own WiFi IP \($0) unavailable for source bind" }
-                        ?? "no routable WiFi (en*) interface found"
+                    ?? lanIP.map { "own WiFi IP \($0) unavailable for source bind" }
+                    ?? "no routable WiFi (en*) interface found"
                 verboseLog("[minimuxer] [net] SOURCE-BIND relay not available (\(reason)) — falling back to utun peer \(peerIP ?? "nil")")
                 LockdownSourceRelay.stop()
                 await apply(peerIP)
