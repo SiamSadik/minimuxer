@@ -102,7 +102,12 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
             // to the device's own WiFi IP (inside the subnet) via a local relay —
             // the FFI connects to 127.0.0.1:62078, the relay opens a source-bound
             // socket to 10.7.0.1:62078 and splices bytes. No router / VPN changes.
-            if let lanIP = try? await NetworkIfaceScanner.shared.lanIfaceIP(),
+            // RSD-BYPASS: stash the device's own WiFi IP for IdeviceGateway's
+            // RemotePairing endpoint selection (RSD 49152 accepts app
+            // connections there; lockdown 62078 does not).
+            IdeviceGateway.rsdBypassCandidate = try? await NetworkIfaceScanner.shared.lanIfaceIP()
+
+            if let lanIP = IdeviceGateway.rsdBypassCandidate,
                let peerIP,
                LockdownSourceRelay.start(source: lanIP, upstream: peerIP) {
                 verboseLog("[minimuxer] [net] SOURCE-BIND RELAY active — lockdown via 127.0.0.1:62078 -> \(peerIP ?? "?") with source bound to \(lanIP) (inside WiFi subnet)")

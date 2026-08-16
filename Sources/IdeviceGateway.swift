@@ -43,6 +43,41 @@ internal final class IdeviceGateway {
     static let shared = IdeviceGateway()
     var lastError: Error? = nil
 
+    /// RSD-BYPASS: the device's own LAN (WiFi) IP, cached by
+    /// NetworkObserverService.refreshEndpoint(). RSD (49152) accepts app
+    /// connections on this address (unlike lockdown 62078 which is EPERM), so
+    /// the RemotePairing tunnel can be created with an IN-SUBNET source — the
+    /// iOS 26.4+ lockdown source-IP check kills the utun path because the VPN
+    /// rewrites the source to the fake peer (10.7.0.1), which is outside the
+    /// WiFi subnet.
+    static var rsdBypassCandidate: String? = nil
+
+    /// Cheap non-blocking TCP reachability probe (real POLLOUT), used to pick
+    /// the RSD endpoint without blocking.
+    static func isTcpReachable(_ ip: String, port: UInt16) -> Bool {
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        if inet_pton(AF_INET, ip, &addr.sin_addr) != 1 { return false }
+
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+
+        _ = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let result = poll(&pfd, 1, 200)
+        return result > 0 && (pfd.revents & Int16(POLLOUT)) != 0
+    }
+
     private func getRustPlistString(_ node: plist_t) -> String? {
         var valPtr: UnsafeMutablePointer<Int8>? = nil
         plist_get_string_val(node, &valPtr)
@@ -92,6 +127,21 @@ internal final class IdeviceGateway {
             throw IdeviceGatewayError.invalidPairingFile(reason: "The file could not be parsed as a property list (plist).")
         }
 
+        let requiredRPKeys = ["private_key", "public_key", "identifier"]
+        let missingRPKeys = requiredRPKeys.filter { plist[$0] == nil }
+        if missingRPKeys.isEmpty {
+            // RP-FIRST (RSD-BYPASS test): the RemotePairing path runs over RSD
+            // (49152), which — unlike the classic lockdown port 62078 — accepts
+            // app connections on the device's own WiFi IP and loopback. Pointing
+            // tunnel_create_rppairing at an in-subnet endpoint (the device's own
+            // WiFi IP) gives the iOS 26.4+ source-IP check the source it wants,
+            // while the classic lockdown path is stuck with the VPN-rewritten
+            // fake peer (10.7.0.1) which is outside the WiFi subnet and is
+            // killed. Dual-key iLoader files take this path again (stable-era
+            // behavior); files WITHOUT RP keys still fall through to lockdown.
+            return .rppairing
+        }
+
         let requiredLockdownKeys = [
             "WiFiMACAddress", "SystemBUID", "RootPrivateKey", "HostPrivateKey",
             "HostID", "RootCertificate", "UDID", "EscrowBag", "HostCertificate",
@@ -99,19 +149,7 @@ internal final class IdeviceGateway {
         ]
         let missingLockdownKeys = requiredLockdownKeys.filter { plist[$0] == nil }
         if missingLockdownKeys.isEmpty {
-            // Prefer the classic Lockdown path whenever a complete lockdown record
-            // exists (e.g. iLoader-generated files that ALSO embed RP keys). The
-            // RP/RSD tunnel path (tunnel_create_rppairing) needs a device-created
-            // tunnel listener that newer iOS drops over the utun, and the
-            // tunnel-bypass endpoint (the device's own WiFi IP) only serves the
-            // classic lockdown port (62078).
             return .lockdown
-        }
-
-        let requiredRPKeys = ["private_key", "public_key", "identifier"]
-        let missingRPKeys = requiredRPKeys.filter { plist[$0] == nil }
-        if missingRPKeys.isEmpty {
-            return .rppairing
         }
 
         throw IdeviceGatewayError.invalidPairingFile(
@@ -303,16 +341,35 @@ internal final class IdeviceGateway {
             throw IdeviceGatewayError.tunnelPeerIpNotAvailable
         }
 
+        // RSD-BYPASS: prefer an IN-SUBNET RSD endpoint so the RemotePairing TLS
+        // tunnel's source passes the iOS 26.4+ lockdown source-IP check. Order:
+        // device's own WiFi IP (proven CONNECTED for RSD 49152) -> loopback
+        // (CONNECTED) -> the utun tunnel peer (status quo, out-of-subnet source
+        // -> "TLS tunnel: Operation Timeout" on iOS 26.4+).
+        let rsdEndpoint: String
+        var usedFallbackReason: String? = nil
+        if let bypass = Self.rsdBypassCandidate, Self.isTcpReachable(bypass, port: MinimuxerConstants.rsdPort) {
+            rsdEndpoint = bypass
+        } else if Self.isTcpReachable("127.0.0.1", port: MinimuxerConstants.rsdPort) {
+            rsdEndpoint = "127.0.0.1"
+        } else {
+            rsdEndpoint = tunnelPeerIp
+            usedFallbackReason = (Self.rsdBypassCandidate == nil)
+                ? "no WiFi IP cached"
+                : "WiFi IP \(Self.rsdBypassCandidate!) not reachable on 49152"
+        }
+        verboseLog("[IdeviceGateway] RSD-BYPASS endpoint: \(rsdEndpoint):49152\(usedFallbackReason.map { " (fallback: \($0))" } ?? "")")
+
         // Standard RPPairing socket address
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = MinimuxerConstants.rsdPort.bigEndian
-        addr.sin_addr.s_addr = inet_addr(tunnelPeerIp)
+        addr.sin_addr.s_addr = inet_addr(rsdEndpoint)
 
         let hostname = MinimuxerConstants.appName
         var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
 
-        verboseLog("[IdeviceGateway] ensureRPConnection() calling tunnel_create_rppairing with tunnelPeerIp: \(tunnelPeerIp)")
+        verboseLog("[IdeviceGateway] ensureRPConnection() calling tunnel_create_rppairing with endpoint: \(rsdEndpoint)")
         try hostname.withCString { hostPtr in
             withUnsafePointer(to: &addr) { addrPtr in
                 addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
