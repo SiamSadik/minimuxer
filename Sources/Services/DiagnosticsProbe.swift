@@ -117,7 +117,7 @@ final class DiagnosticsProbe {
             outcome = .connected(sourceIP: nil, latencyMs: elapsed)
         } else if connectErrno == EINPROGRESS {
             var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-            let pr = poll(&pfd, 1, timeoutMs)
+            let pr = poll(&pfd, 1, Int32(timeoutMs))
             elapsed = Int64((DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000)
             if pr == 0 {
                 outcome = .timeout(ms: timeoutMs)
@@ -206,7 +206,7 @@ final class DiagnosticsProbe {
         var result = "no state within \(Int(timeout))s (permission prompt may be pending)"
         let listener: NWListener
         do {
-            listener = try NWListener(using: .tcp, on: nil)
+            listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: 0)!)
         } catch {
             verboseLog("[minimuxer] [diag] LAN-permission: NWListener create failed: \(error)")
             return
