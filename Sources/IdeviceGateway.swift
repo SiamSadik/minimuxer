@@ -722,6 +722,28 @@ internal final class IdeviceGateway {
         }
     }
 
+    /// RSD-BYPASS fallback: the device UDID recorded in the pairing file itself.
+    /// On iOS 26.4+/27 with the default LocalDevVPN config the RP tunnel can't be
+    /// established at ANY endpoint (loopback & the device's own WiFi IP are RST'd
+    /// by the RemotePairing daemon — anti-self — and the utun peer dies in the
+    /// source-IP check), so device handshakes all fail. But the pairing file is
+    /// still valid and contains the device's own UDID (the lockdown `UDID` key;
+    /// RP-only records carry it as `identifier`). Returning it lets SideStore
+    /// register the device with Apple, enable JIT, and stamp device IDs — none of
+    /// which need the dead tunnel — and lets the Health Check show the pairing
+    /// file's true state ("Verified") instead of conflating it with the
+    /// unreachable device.
+    private func pairingFileUDID() -> String? {
+        guard let dict = pairingDataDict else { return nil }
+        if let udid = dict["UDID"] as? String, !udid.isEmpty {
+            return udid
+        }
+        if let id = dict["identifier"] as? String, !id.isEmpty {
+            return id
+        }
+        return nil
+    }
+
     func fetchUDID() throws -> String? {
         debugLog("[IdeviceGateway] fetchUDID() started, isRPPairing: \(isRPPairing) (mode = .\(pairingFileType))")
         try verifyInitialized()
@@ -731,11 +753,16 @@ internal final class IdeviceGateway {
                 try ensureRPConnection()
             } catch {
                 debugLog("[IdeviceGateway] fetchUDID() ensureRPConnection failed with error: \(error)")
+                // RP tunnel unavailable — fall back to the pairing file's UDID.
+                if let fallback = pairingFileUDID() {
+                    debugLog("[IdeviceGateway] fetchUDID() RP tunnel unavailable — returning pairing-file UDID \(fallback)")
+                    return fallback
+                }
                 return nil
             }
             guard let adapter = adapter, let handshake = handshake else {
                 debugLog("[IdeviceGateway] fetchUDID() adapter (\(String(describing: adapter))) or handshake (\(String(describing: handshake))) is nil")
-                return nil
+                return pairingFileUDID()
             }
             var lockdownClient: OpaquePointer? = nil
             verboseLog("[IdeviceGateway] fetchUDID() connecting lockdownd_connect_rsd")
@@ -744,11 +771,11 @@ internal final class IdeviceGateway {
                 debugLog("[IdeviceGateway] fetchUDID() lockdownd_connect_rsd failed")
                 idevice_error_free(connectErr)
                 invalidateConnection()
-                return nil
+                return pairingFileUDID()
             }
             guard let client = lockdownClient else {
                 debugLog("[IdeviceGateway] fetchUDID() lockdownClient is nil after connect")
-                return nil
+                return pairingFileUDID()
             }
             defer { lockdownd_client_free(client) }
             
@@ -758,7 +785,7 @@ internal final class IdeviceGateway {
             if let valErr = valErr {
                 debugLog("[IdeviceGateway] fetchUDID() lockdownd_get_value failed")
                 safeFreeError(valErr)
-                return nil
+                return pairingFileUDID()
             }
             if let plistVal = plistVal {
                 defer {
@@ -769,7 +796,7 @@ internal final class IdeviceGateway {
                 return udid
             }
             debugLog("[IdeviceGateway] fetchUDID() plistVal is nil")
-            return nil
+            return pairingFileUDID()
         } else {
             var conn: OpaquePointer? = nil
             let err = idevice_usbmuxd_new_default_connection(0, &conn)
