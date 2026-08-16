@@ -77,6 +77,9 @@ internal final class IdeviceGateway {
     private var tunnelPeerIp: String? = nil
     private var isInitialized = false
 
+    /// Internal read accessor for the diagnostic probe suite.
+    var currentTunnelPeerIp: String? { tunnelPeerIp }
+
     private(set) var isRPPairing: Bool = false
     private(set) var pairingFileType: PairingProtocol = .unknown
     
@@ -563,11 +566,12 @@ internal final class IdeviceGateway {
         connect: @escaping (OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> UnsafeMutablePointer<IdeviceFfiError>?,
         cleanup: @escaping (OpaquePointer?) -> Void,
         serviceName: String,
+        peerOverride: String? = nil,
         action: (OpaquePointer) throws -> T
     ) throws -> T {
         verboseLog("[IdeviceGateway] performWithTcpService(\(serviceName)) started")
         
-        guard let tunnelPeerIp = tunnelPeerIp else {
+        guard let effectivePeer = peerOverride ?? tunnelPeerIp else {
             debugLog("[IdeviceGateway] performWithTcpService(\(serviceName)) failed because tunnelPeerIp is nil")
             throw IdeviceGatewayError.tunnelPeerIpNotAvailable
         }
@@ -575,7 +579,7 @@ internal final class IdeviceGateway {
         var sockAddr = sockaddr_in()
         sockAddr.sin_family = sa_family_t(AF_INET)
         sockAddr.sin_port = MinimuxerConstants.lockdowndPort.bigEndian
-        sockAddr.sin_addr.s_addr = inet_addr(tunnelPeerIp)
+        sockAddr.sin_addr.s_addr = inet_addr(effectivePeer)
         #if os(macOS) || os(iOS)
         sockAddr.sin_len = __uint8_t(MemoryLayout<sockaddr_in>.size)
         #endif
@@ -1557,6 +1561,39 @@ internal final class IdeviceGateway {
             serviceName: "image mounter"
         ) { client in
             try isDeveloperDiskImageMounted(mounterClient: client)
+        }
+    }
+
+    /// Diagnostic: run the image-mounter service round-trip against a specific
+    /// peer IP (e.g. 127.0.0.1) WITHOUT mutating the shared tunnelPeerIp.
+    /// Returns a human-readable outcome string for the probe suite.
+    func diagProbeImageMounterVia(ip: String) -> String {
+        debugLog("[IdeviceGateway] diagProbeImageMounterVia(\(ip)) started")
+        do {
+            let mounted = try performWithTcpService(
+                connect: image_mounter_connect,
+                cleanup: image_mounter_free,
+                serviceName: "image mounter (diag \(ip))",
+                peerOverride: ip
+            ) { client in
+                try isDeveloperDiskImageMounted(mounterClient: client)
+            }
+            return "SUCCEEDED via \(ip), mounted=\(mounted)"
+        } catch {
+            return "FAILED via \(ip): \(error)"
+        }
+    }
+
+    /// Diagnostic: raises/lowers the idevice FFI logger level (4 = full debug,
+    /// incl. the lockdown TLS/pairing handshake steps). Used around the
+    /// loopback lockdown test so we can see exactly where the handshake dies.
+    func setDiagnosticFFILogging(_ enabled: Bool) {
+        if enabled {
+            idevice_init_logger(IdeviceLogLevel(rawValue: 4), IdeviceLogLevel(rawValue: 4), nil)
+            verboseLog("[IdeviceGateway] FFI diagnostic logging ENABLED (level 4)")
+        } else {
+            idevice_init_logger(IdeviceLogLevel(rawValue: 1), IdeviceLogLevel(rawValue: 0), nil)
+            verboseLog("[IdeviceGateway] FFI diagnostic logging restored (level 1)")
         }
     }
 

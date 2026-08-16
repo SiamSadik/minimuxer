@@ -229,7 +229,16 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         retargetUsbmuxdAddr()
         // start our fake usbmuxd server for lockdown protocol based clients if required
         try await restartMuxerServer()
-        
+
+        // Diagnostic probe suite (test build): runs concurrently with the
+        // initial mount attempt and prints to the console log. Includes the
+        // TCP probe matrix with real errno, the Local Network permission
+        // check, and the loopback lockdown + full-mount test.
+        Task {
+            await DiagnosticsProbe.shared.runSuite()
+            await self.diagLoopbackMountAttempt()
+        }
+
         do {
             try await matchingPriority{
                 try await Mounter.shared.mount(docsPath: mountPath)
@@ -294,6 +303,45 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         try await matchingPriority{
             try IdeviceGateway.shared.isDDIMounted()
         }
+    }
+
+    /// Diagnostic (test build): switch the shared tunnel peer to 127.0.0.1 and
+    /// attempt the FULL DDI mount over loopback lockdown — the decisive test of
+    /// whether the app can reach lockdownd at all (and mount the DDI) when the
+    /// Local Network path is denied. Restores the original peer afterwards.
+    func diagLoopbackMountAttempt() async {
+        verboseLog("[minimuxer] [diag] === LOOPBACK FULL-MOUNT TEST (peer -> 127.0.0.1) ===")
+        let probe = DiagnosticsProbe.shared.probeTCP("127.0.0.1", port: MinimuxerConstants.lockdowndPort, timeoutMs: 2000)
+        guard probe.isConnected else {
+            verboseLog("[minimuxer] [diag] loopback 62078 not connected (\(probe)) — skipping full-mount test")
+            return
+        }
+        guard let docsPath = await state.lastDocsPath else {
+            verboseLog("[minimuxer] [diag] lastDocsPath is nil — skipping full-mount test")
+            return
+        }
+        let original = try? await TunnelPeer.shared.ip()
+        verboseLog("[minimuxer] [diag] switching peer \(original ?? "nil") -> 127.0.0.1")
+        await TunnelPeer.shared.update("127.0.0.1")
+        IdeviceGateway.shared.setDiagnosticFFILogging(true)
+        do {
+            let mounted = try await Mounter.shared.mount(docsPath: docsPath, maxRetries: 1)
+            verboseLog("[minimuxer] [diag] LOOPBACK FULL-MOUNT: SUCCESS (mounted=\(mounted)) — DDI path works via 127.0.0.1!")
+        } catch {
+            verboseLog("[minimuxer] [diag] LOOPBACK FULL-MOUNT: FAILED — \(error)")
+        }
+        IdeviceGateway.shared.setDiagnosticFFILogging(false)
+        if let original {
+            await TunnelPeer.shared.update(original)
+            verboseLog("[minimuxer] [diag] peer restored -> \(original)")
+        }
+    }
+
+    func runDiagnostics() async {
+        verboseLog("[minimuxer] [diag] === manual diagnostics run requested ===")
+        await DiagnosticsProbe.shared.runSuite()
+        await diagLoopbackMountAttempt()
+        verboseLog("[minimuxer] [diag] === manual diagnostics run complete ===")
     }
 
     func reinitializePairingData(pairingFile: String) async throws {

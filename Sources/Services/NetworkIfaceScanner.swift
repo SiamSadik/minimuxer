@@ -101,6 +101,19 @@ internal struct NetInfo: Hashable, CustomStringConvertible, Sendable {
     var networkBase: UInt32 { host & mask }
     var broadcast: UInt32 { networkBase | ~mask }
 
+    /// Likely default-gateway candidate (network base + 1) — diagnostic probes
+    /// use it to test LAN TCP to OTHER hosts (Local Network permission gate).
+    var gatewayCandidate: String? {
+        let g = networkBase + 1
+        return g == host ? nil : ipv4String(g)
+    }
+
+    /// Far end of the subnet (broadcast - 1) — another LAN-reachability probe
+    /// target that usually belongs to some real device on the network.
+    var farEndCandidate: String? {
+        broadcast > networkBase + 1 ? ipv4String(broadcast - 1) : nil
+    }
+
     var description: String {
         var desc = "\(name) | ip: \(hostIP) mask: \(maskIP) linkType: \(linkType)"
         if let rep = reportedPeer {

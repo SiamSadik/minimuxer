@@ -29,17 +29,20 @@ final internal class Mounter {
                 debugLog("[minimuxer] mounter: usbmuxd not ready!")
                 throw MinimuxerError.noConnection("Usbmuxd fake server is not listening")
             }
+            verboseLog("[minimuxer] mounter: [step] fake usbmuxd ready (listening=\(MuxerService.isListening))")
         }
 
         // Prerequisite: device must be reachable
-        guard (try? await TunnelPeer.shared.ip()) != nil else {
+        guard let peerIP = try? await TunnelPeer.shared.ip() else {
             debugLog("[minimuxer] mounter: tunnel peer IP not available")
             throw MinimuxerError.noDevice("Reachable tunnel peer IP not found")
         }
+        verboseLog("[minimuxer] mounter: [step] tunnel peer = \(peerIP)")
 
         let isDDIMounted = try runIdevice("isDDIMounted") {
             try IdeviceGateway.shared.isDDIMounted()
         }
+        verboseLog("[minimuxer] mounter: [step] isDDIMounted -> \(isDDIMounted)")
         if isDDIMounted {
             verboseLog("[minimuxer] mounter: DeveloperDiskImage is already mounted. Bypassing mount.")
             return false
@@ -58,6 +61,7 @@ final internal class Mounter {
             versionStr = v
             major = Int(v.split(separator: ".").first ?? "0") ?? 0
         }
+        verboseLog("[minimuxer] mounter: [step] ProductVersion = \(versionStr ?? "nil") (major \(major))")
 
         let activeProtocol: PairingProtocol = isRPPairing ? .rppairing : .lockdown
         var lastError: Error = MinimuxerError.mount(protocol: activeProtocol, reason: "Initial mount state")
@@ -213,6 +217,9 @@ final internal class Mounter {
                     throw MinimuxerError.downloadImage("Failed to download post-17 file from \(urlStr)")
                 }
                 try data.write(to: path)
+                verboseLog("[minimuxer] mounter: [step] downloaded \(path.lastPathComponent) (\(data.count) B)")
+            } else {
+                verboseLog("[minimuxer] mounter: [step] using existing \(path.lastPathComponent)")
             }
         }
         verboseLog("[minimuxer] Files downloaded, reading to memory")
@@ -228,6 +235,8 @@ final internal class Mounter {
         let imageData      = try Data(contentsOf: imageURL)
         let trustcacheData = try Data(contentsOf: trustcacheURL)
         let manifestData   = try Data(contentsOf: manifestURL)
+
+        verboseLog("[minimuxer] mounter: [step] image=\(imageData.count)B trustcache=\(trustcacheData.count)B manifest=\(manifestData.count)B")
 
         return (imageData, trustcacheData, manifestData)
     }

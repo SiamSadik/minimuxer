@@ -47,6 +47,11 @@ public protocol MinimuxerAPI: AnyObject {
     func mountDDI(docsPath: String) async throws -> Bool
     func isDDIMounted() async throws -> Bool
 
+    /// Diagnostic probe suite (test build): TCP probe matrix with real errno,
+    /// Local Network permission check, loopback lockdown test, and a full DDI
+    /// mount attempt via 127.0.0.1. Output goes to the console log.
+    func runDiagnostics() async
+
     func fetchUDID() async throws -> String?
     func testDeviceConnection(ifaddr: String?) -> Bool
 
